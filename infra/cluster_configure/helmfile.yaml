@@ -1,0 +1,192 @@
+---
+repositories:
+  - name: bitnami
+    url: https://charts.bitnami.com/bitnami
+  - name: istio
+    url: https://istio-release.storage.googleapis.com/charts
+  - name: jetstack
+    url: https://charts.jetstack.io
+  - name: prometheus-community
+    url: https://prometheus-community.github.io/helm-charts
+
+releases:
+  ##############
+  # External DNS
+  ##############
+  - name: external-dns
+    namespace: externaldns
+    chart: bitnami/external-dns
+    version: 6.14.1
+    values:
+      - provider: azure
+        azure:
+          resourceGroup: {{ requiredEnv "AZ_RESOURCE_GROUP" }}
+          tenantId: {{ requiredEnv "AZ_TENANT_ID" }}
+          subscriptionId: {{ requiredEnv "AZ_SUBSCRIPTION_ID" }}
+          aadClientId: {{ requiredEnv "SP_CLIENT_ID" }}
+          aadClientSecret: {{ requiredEnv "SP_CLIENT_SECRET" }}
+          cloud: AzurePublicCloud
+        domainFilters:
+          - {{ requiredEnv "DOMAIN_NAME" }}
+        txtOwnerId: {{ requiredEnv "AZ_AKS_NAME" }}
+        policy: sync
+        sources:
+          - istio-gateway
+        logLevel: {{ env "EXTERNALDNS_LOG_LEVEL" | default "debug" }}
+
+  ##############
+  # Istio
+  ##############
+  - name: istio-base
+    namespace: istio-system
+    chart: istio/base
+    version: 1.17.1
+
+  - name: istiod
+    namespace: istio-system
+    chart: istio/istiod
+    version: 1.17.1
+    needs:
+      - istio-system/istio-base
+
+  - name: istio-ingress
+    namespace: istio-ingress
+    chart: istio/gateway
+    version: 1.17.1
+    needs:
+      - istio-system/istiod
+
+  - name: istio-strict-peer-auth
+    namespace: istio-system
+    chart: itscontained/raw
+    version: 0.2.5
+    needs:
+      - istio-system/istiod
+    values:
+      - resources:
+          - apiVersion: security.istio.io/v1beta1
+            kind: PeerAuthentication
+            metadata:
+              name: "default"
+            spec:
+              mtls:
+                mode: STRICT
+
+  ##############
+  # Cert Manager
+  ##############
+  - name: cert-manager
+    namespace: cert-manager
+    chart: jetstack/cert-manager
+    version: 1.11.0
+    values:
+      - installCRDs: true
+        global:
+          logLevel: 2
+
+  - name: cert-manager-azure-sp-secret
+    namespace: cert-manager
+    chart: itscontained/raw
+    version: 0.2.5
+    needs:
+      - cert-manager/cert-manager
+    values:
+      - resources:
+          - apiVersion: v1
+            kind: Secret
+            metadata:
+              name: cert-manager-azure-sp-secret
+            type: Opaque
+            stringData:
+              sp-client-secret: {{ requiredEnv "SP_CLIENT_SECRET" }}
+
+  - name: cert-manager-issuers
+    namespace: cert-manager
+    chart: itscontained/raw
+    version: 0.2.5
+    needs:
+      - cert-manager/cert-manager-azure-sp-secret
+    values:
+      - resources:
+          - apiVersion: cert-manager.io/v1
+            kind: ClusterIssuer
+            metadata:
+              name: letsencrypt-staging
+            spec:
+              acme:
+                server: https://acme-staging-v02.api.letsencrypt.org/directory
+                email: {{ requiredEnv "ACME_ISSUER_EMAIL" }}
+                privateKeySecretRef:
+                  name: letsencrypt-staging
+                solvers:
+                  - dns01:
+                      azureDNS:
+                        clientID: {{ requiredEnv "SP_CLIENT_ID" }}
+                        clientSecretSecretRef:
+                          name: cert-manager-azure-sp-secret
+                          key: sp-client-secret
+                        subscriptionID: {{ requiredEnv "AZ_SUBSCRIPTION_ID" }}
+                        tenantID: {{ requiredEnv "AZ_TENANT_ID" }}
+                        resourceGroupName:
+                          {{ requiredEnv "AZ_RESOURCE_GROUP" }}
+                        hostedZoneName: {{ requiredEnv "DOMAIN_NAME" }}
+                        environment: AzurePublicCloud
+
+          - apiVersion: cert-manager.io/v1
+            kind: ClusterIssuer
+            metadata:
+              name: letsencrypt-prod
+            spec:
+              acme:
+                server: https://acme-v02.api.letsencrypt.org/directory
+                email: {{ requiredEnv "ACME_ISSUER_EMAIL" }}
+                privateKeySecretRef:
+                  name: letsencrypt-prod
+                solvers:
+                  - dns01:
+                      azureDNS:
+                        clientID: {{ requiredEnv "SP_CLIENT_ID" }}
+                        clientSecretSecretRef:
+                          name: cert-manager-azure-sp-secret
+                          key: sp-client-secret
+                        subscriptionID: {{ requiredEnv "AZ_SUBSCRIPTION_ID" }}
+                        tenantID: {{ requiredEnv "AZ_TENANT_ID" }}
+                        resourceGroupName:
+                          {{ requiredEnv "AZ_RESOURCE_GROUP" }}
+                        hostedZoneName: {{ requiredEnv "DOMAIN_NAME" }}
+                        environment: AzurePublicCloud
+
+  ##############
+  # Mimic Minikube Storage on AKS
+  ##############
+  - name: standard-storage
+    chart: itscontained/raw
+    version: 0.2.5
+    values:
+      - resources:
+          - apiVersion: storage.k8s.io/v1
+            allowVolumeExpansion: true
+            kind: StorageClass
+            metadata:
+              labels:
+                addonmanager.kubernetes.io/mode: EnsureExists
+                kubernetes.io/cluster-service: "true"
+              name: standard
+            parameters:
+              skuname: StandardSSD_LRS
+            provisioner: disk.csi.azure.com
+            reclaimPolicy: Delete
+            volumeBindingMode: WaitForFirstConsumer
+
+  ##############
+  # Prometheus/Grafana/Kiali
+  ##############
+  - name: prometheus-namespace
+    chart: itscontained/raw
+    version: 0.2.5
+    values:
+      - resources:
+          - apiVersion: v1
+            kind: Namespace
+            metadata:
+              name: prometheus

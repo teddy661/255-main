@@ -1,0 +1,4 @@
+.terraform*
+terraform.tfstate*
+yamls
+!yamls/gateway.yaml
